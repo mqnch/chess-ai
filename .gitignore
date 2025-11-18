@@ -80,3 +80,4 @@ pytest_cache/
 .pytest_cache/
 
 vision.md
+.gitignore
