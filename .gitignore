@@ -1,0 +1,82 @@
+# ------------------------------------
+# Python
+# ------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.so
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+
+# Virtual environments
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Pip caches
+pip-wheel-metadata/
+pip-wheel-metadata/
+.pip/
+
+# ------------------------------------
+# Project-specific (AlphaZero Chess)
+# ------------------------------------
+# Model checkpoints
+*.pt
+*.pth
+checkpoints/
+models/
+
+# Self-play generated data
+data/
+games/
+training_data/
+replay_buffer/
+
+# Logs & debug output
+logs/
+*.log
+*.out
+
+# Temporary playground files
+scratch/
+tmp/
+temp/
+
+# Python-chess debug boards (if any)
+*.fen
+*.pgn
+
+# ------------------------------------
+# VSCode
+# ------------------------------------
+.vscode/
+.history/
+.code/
+
+# ------------------------------------
+# OS junk
+# ------------------------------------
+.DS_Store
+Thumbs.db
+
+# ------------------------------------
+# Testing
+# ------------------------------------
+.coverage
+htmlcov/
+.cache/
+pytest_cache/
+.tox/
+.mypy_cache/
+.pytest_cache/
+
+vision.md
