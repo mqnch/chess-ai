@@ -7,3 +7,5 @@ torchvision
 numpy
 matplotlib
 tensorboard
+scikit-learn
+scikit-optimize

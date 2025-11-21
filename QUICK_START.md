@@ -89,16 +89,29 @@ trainer.load_checkpoint("checkpoints/checkpoint_iter_X.pth")
 ### Tips
 
 1. **Start Small**: Use lower parameters first to verify everything works
-2. **GPU vs CPU**: 
-   - GPU: Much faster (set `DEVICE = "cuda"`)
-   - CPU: Works but slower (set `DEVICE = "cpu"`)
+2. **Device Selection**: 
+   - **M1 Mac**: The script auto-detects MPS (Metal Performance Shaders) for ~2-3x speedup
+   - **NVIDIA GPU**: Set `DEVICE = "cuda"` for fastest training
+   - **CPU only**: Set `DEVICE = "cpu"` (slowest but works everywhere)
+   - MPS on M1 Mac typically gives ~1-2 min/iteration vs ~3-6 min on CPU
 3. **Memory**: If you run out of memory, reduce:
    - `GAMES_PER_ITERATION`
    - `TRAIN_BATCH_SIZE`
    - `replay_buffer.capacity`
-4. **Time**: Each iteration takes:
-   - ~30-60 seconds on CPU (with default settings)
-   - ~10-20 seconds on GPU (with default settings)
+4. **Time**: Each iteration takes (with default settings):
+   - **M1 Mac (CPU)**: ~3-6 minutes per iteration
+     - Game generation: ~2-4 minutes (5 games × ~30-50s each)
+     - Training: ~1-2 minutes (50 batches)
+   - **M1 Mac (MPS/GPU)**: ~1-2 minutes per iteration
+     - Game generation: ~45-90 seconds
+     - Training: ~15-30 seconds
+   - **Intel CPU**: ~5-10 minutes per iteration
+   - **NVIDIA GPU**: ~30-60 seconds per iteration
+   
+   **Breakdown per game on M1 Mac:**
+   - With 100 MCTS simulations: ~30-50 seconds per game
+   - With 50 MCTS simulations: ~15-25 seconds per game (faster but lower quality)
+   - With 200 MCTS simulations: ~60-100 seconds per game (slower but better)
 
 ### Expected Timeline
 

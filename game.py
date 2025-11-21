@@ -48,17 +48,27 @@ class SelfPlayGame:
 
     def __init__(
         self,
-        model: torch.nn.Module,
+        model: Optional[torch.nn.Module],
         device: str = "cpu",
         config: Optional[SelfPlayConfig] = None,
+        inference_service: Optional[BatchInference] = None,
+        owns_inference: bool = False,
     ):
         self.config = config or SelfPlayConfig()
         self.device = torch.device(device)
-        self.inference = BatchInference(
-            model=model,
-            batch_size=self.config.batch_size,
-            device=device,
-        )
+        self._owns_inference = owns_inference
+
+        if inference_service is not None:
+            self.inference = inference_service
+        else:
+            if model is None:
+                raise ValueError("model must be provided when inference_service is None")
+            self.inference = BatchInference(
+                model=model,
+                batch_size=self.config.batch_size,
+                device=device,
+            )
+            self._owns_inference = True
         self.mcts = MCTS(
             inference_service=self.inference,
             c_puct=self.config.c_puct,
@@ -74,7 +84,8 @@ class SelfPlayGame:
 
     def close(self):
         """stop background inference threads."""
-        self.inference.stop()
+        if self._owns_inference and hasattr(self.inference, "stop"):
+            self.inference.stop()
 
     def run_game(self) -> List[SelfPlaySample]:
         """run a complete self-play game and return recorded samples."""

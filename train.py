@@ -19,6 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from replay_buffer import ReplayBuffer
 from model import ChessNet
+from checkpoint_utils import save_checkpoint as save_ckpt, load_checkpoint as load_ckpt
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -196,16 +197,35 @@ class Trainer:
 
         return total_metrics
 
-    def save_checkpoint(self, path: str = "checkpoint.pth"):
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-        }, path)
+    def save_checkpoint(
+        self,
+        path: str = "checkpoint.pth",
+        replay_buffer: Optional[ReplayBuffer] = None,
+        metadata: Optional[Dict[str, float]] = None,
+    ):
+        save_ckpt(
+            path=path,
+            model=self.model,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            replay_buffer=replay_buffer,
+            metadata=metadata,
+        )
         logger.info(f"Checkpoint saved to {path}")
 
-    def load_checkpoint(self, path: str):
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    def load_checkpoint(
+        self,
+        path: str,
+        replay_buffer: Optional[ReplayBuffer] = None,
+    ) -> Dict[str, float]:
+        metadata = load_ckpt(
+            path=path,
+            model=self.model,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            replay_buffer=replay_buffer,
+            map_location=self.device,
+        )
         logger.info(f"Checkpoint loaded from {path}")
+        return metadata
 

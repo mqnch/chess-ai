@@ -1,3 +1,5 @@
+import os
+import tempfile
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -112,23 +114,26 @@ class TestTrainer(unittest.TestCase):
         metrics = self.trainer.train_epoch(empty_buffer, batch_size=32, num_batches=1)
         self.assertIsNone(metrics)
 
+    def test_replay_buffer_state_dict(self):
+        """Replay buffer can round-trip through state dict."""
+        state = self.replay_buffer.state_dict()
+        clone = ReplayBuffer(capacity=state["capacity"])
+        clone.load_state_dict(state)
+        self.assertEqual(len(clone), len(self.replay_buffer))
+
     def test_save_and_load_checkpoint(self):
-        """Test saving and loading checkpoints."""
-        import os
-        checkpoint_path = "test_checkpoint.pth"
-        
-        # Save
-        self.trainer.save_checkpoint(checkpoint_path)
-        self.assertTrue(os.path.exists(checkpoint_path))
-        
-        # Load
-        try:
-            self.trainer.load_checkpoint(checkpoint_path)
-        except Exception as e:
-            self.fail(f"load_checkpoint raised exception: {e}")
-        finally:
-            if os.path.exists(checkpoint_path):
-                os.remove(checkpoint_path)
+        """Test saving and loading checkpoints with replay buffer."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = os.path.join(tmpdir, "test_checkpoint.pth")
+            metadata = {"iteration": 3, "total_games": 12}
+            self.trainer.save_checkpoint(
+                checkpoint_path, replay_buffer=self.replay_buffer, metadata=metadata
+            )
+            self.assertTrue(os.path.exists(checkpoint_path))
+            loaded_meta = self.trainer.load_checkpoint(
+                checkpoint_path, replay_buffer=self.replay_buffer
+            )
+            self.assertEqual(metadata["iteration"], loaded_meta.get("iteration"))
 
 if __name__ == '__main__':
     unittest.main()

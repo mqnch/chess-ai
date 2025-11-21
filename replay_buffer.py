@@ -1,6 +1,6 @@
 import random
 import threading
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import torch
 
@@ -45,6 +45,50 @@ class ReplayBuffer:
         """add multiple samples to the buffer."""
         for sample in samples:
             self.add(sample)
+
+    def state_dict(self) -> Dict:
+        """serialize buffer contents for checkpointing."""
+        with self.lock:
+            return {
+                "capacity": self.capacity,
+                "next_index": self.next_index,
+                "size": self.size,
+                "storage": [
+                    {
+                        "state": sample.state.clone(),
+                        "policy": sample.policy.clone(),
+                        "value": sample.value,
+                    }
+                    for sample in self.storage
+                ],
+            }
+
+    def load_state_dict(self, state: Dict):
+        """restore buffer contents from serialized data."""
+        with self.lock:
+            self.capacity = state.get("capacity", self.capacity)
+            self.next_index = state.get("next_index", 0)
+            self.size = state.get("size", 0)
+            self.storage = []
+            for item in state.get("storage", []):
+                sample = SelfPlaySample(
+                    state=item["state"].clone(),
+                    policy=item["policy"].clone(),
+                    value=float(item["value"]),
+                )
+                self.storage.append(sample)
+            # clamp values
+            self.size = min(self.size, len(self.storage), self.capacity)
+            self.next_index = self.size % self.capacity
+
+    def save(self, path: str):
+        """persist buffer to disk."""
+        torch.save(self.state_dict(), path)
+
+    def load(self, path: str, map_location: Optional[str] = None):
+        """load buffer from disk."""
+        state = torch.load(path, map_location=map_location or "cpu")
+        self.load_state_dict(state)
 
     def sample(
         self,
