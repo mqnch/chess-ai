@@ -116,6 +116,22 @@ class Trainer:
         value_loss, policy_loss = self.compute_loss(pred_policies, pred_values, policies, values)
         total_loss = value_loss + policy_loss
         
+        # Debug: log value statistics occasionally
+        if hasattr(self, '_step_count'):
+            self._step_count += 1
+        else:
+            self._step_count = 0
+        
+        if self._step_count % 50 == 0:  # Log every 50 steps
+            pred_mean = pred_values.mean().item()
+            pred_std = pred_values.std().item()
+            target_mean = values.mean().item()
+            target_std = values.std().item()
+            logger.debug(
+                f"Step {self._step_count}: Pred values: mean={pred_mean:.3f}, std={pred_std:.3f}, "
+                f"Target values: mean={target_mean:.3f}, std={target_std:.3f}"
+            )
+        
         # Backward pass
         total_loss.backward()
         self.optimizer.step()

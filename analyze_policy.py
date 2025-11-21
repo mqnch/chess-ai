@@ -23,18 +23,35 @@ from encode import board_to_tensor, move_to_action
 
 def load_model(path, device='cpu'):
     """Loads the trained model from a checkpoint."""
-    model = ChessNet()
     checkpoint = torch.load(path, map_location=device)
+    
+    # determine model architecture from checkpoint metadata or use defaults
+    metadata = checkpoint.get("metadata", {})
+    settings = metadata.get("settings", {})
+    num_blocks = settings.get("model_residual_blocks", 6)
+    num_channels = settings.get("model_channels", 128)
+    
+    # create model with correct architecture
+    model = ChessNet(
+        num_residual_blocks=num_blocks,
+        num_channels=num_channels
+    )
+    
+    # load state dict
     if 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
-        model.load_state_dict(checkpoint) # Support loading raw state dict
+        model.load_state_dict(checkpoint)  # Support loading raw state dict
+    
     model.to(device)
     model.eval()
+    
+    print(f"Loaded model: {num_blocks} blocks, {num_channels} channels")
     return model
 
-def get_policy_value(model, board, device='cpu'):
+def get_policy_value(model, board):
     """Runs inference on a chess.Board."""
+    device = next(model.parameters()).device
     tensor = board_to_tensor(board).unsqueeze(0).to(device)
     with torch.no_grad():
         policy_logits, value = model(tensor)
@@ -45,8 +62,7 @@ def visualize_policy(model, board, output_file="policy_viz.png", top_k=5):
     """
     Visualizes the top K moves from the policy on the board using arrows.
     """
-    device = next(model.parameters()).device
-    policy_logits, value = get_policy_value(model, board, device)
+    policy_logits, value = get_policy_value(model, board)
     
     # Decode policy
     legal_moves = list(board.legal_moves)
@@ -97,7 +113,7 @@ def visualize_policy(model, board, output_file="policy_viz.png", top_k=5):
     svg_data = chess.svg.board(board, arrows=arrows, size=400)
     
     # Convert to PNG
-    png_bytes = cairosvg.svg2png(bytestring=svg_string.encode('utf-8'))
+    png_bytes = cairosvg.svg2png(bytestring=svg_data.encode('utf-8'))
     image = Image.open(io.BytesIO(png_bytes))
     image.save(output_file)
     print(f"Saved visualization to {output_file}")
@@ -123,11 +139,25 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--fen", type=str, default=chess.STARTING_FEN, help="FEN string to analyze")
     parser.add_argument("--analyze_openings", action="store_true", help="Run analysis on standard openings")
+    parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/mps/cpu). Auto-detects if not specified.")
     
     args = parser.parse_args()
     
+    # auto-detect device
+    if args.device is None:
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = "mps"  # Metal Performance Shaders for M1/M2 Macs
+        else:
+            device = "cpu"
+    else:
+        device = args.device
+    
+    print(f"Using device: {device}")
+    
     try:
-        model = load_model(args.model_path)
+        model = load_model(args.model_path, device=device)
         
         if args.analyze_openings:
             analyze_openings(model)

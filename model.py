@@ -85,6 +85,13 @@ class ChessNet(nn.Module):
                 nn.init.xavier_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+        
+        # special initialization for value head final layer to help it learn
+        # initialize to small random values so it doesn't start at exactly 0
+        if hasattr(self, 'value_fc2'):
+            nn.init.normal_(self.value_fc2.weight, mean=0.0, std=0.01)
+            if self.value_fc2.bias is not None:
+                nn.init.constant_(self.value_fc2.bias, 0.0)
     
     def forward(self, x):
         """

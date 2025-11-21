@@ -35,13 +35,13 @@ Phase 6 – Evaluation and gating (Week 7)
 
 
 Phase 7 – Parallelization and scaling (Weeks 8–9)
-- [ ] Multiprocessing: spawn multiple self‑play workers (for example 4–16) that share the neural network via shared memory; manage GPU inference requests using a central queue.
-- [ ] Checkpointing: save the network and replay buffer periodically to allow resuming training and analysing intermediate strength.
-- [ ] Hyperparameter tuning: adjust the number of MCTS simulations (for example 200–800), replay buffer size, batch size, learning rate and Dirichlet noise to balance exploration versus exploitation.
+- [x] Multiprocessing: spawn multiple self‑play workers (for example 4–16) that share the neural network via shared memory; manage GPU inference requests using a central queue.
+- [x] Checkpointing: save the network and replay buffer periodically to allow resuming training and analysing intermediate strength.
+- [x] Hyperparameter tuning: adjust the number of MCTS simulations (for example 200–800), replay buffer size, batch size, learning rate and Dirichlet noise to balance exploration versus exploitation.
 
 
 Phase 8 – Extended training and strength measurement (Weeks 10–12 and beyond)
 - [ ] Long‑term self‑play: run your pipeline continuously for several weeks. On modest hardware this is the bottleneck; generating millions of games can take weeks. For example, a Medium article about a hobby project noted that training for one day on a single computer produced only limited improvementmedium.com. Expect to run the system for several weeks to reach around 1500–2000 Elo, depending on hardware and hyperparameters.
 - [ ] Periodic evaluation: track Elo progression by playing matches against Stockfish at low search depth or open‑source engines.
-- [ ] Visualization and analysis: implement scripts to visualise policy distributions, opening preferences and typical mistakes.
+- [x] Visualization and analysis: implement scripts to visualise policy distributions, opening preferences and typical mistakes.
 
