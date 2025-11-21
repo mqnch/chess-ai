@@ -6,3 +6,4 @@ torch
 torchvision
 numpy
 matplotlib
+tensorboard
