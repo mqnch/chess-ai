@@ -4,6 +4,8 @@ import unittest
 from model import ChessNet
 from encode import board_to_tensor, move_to_action, action_to_move
 from board import ChessGame
+from game import SelfPlayGame, SelfPlayConfig
+from replay_buffer import ReplayBuffer
 
 
 class TestChessNet(unittest.TestCase):
@@ -256,6 +258,66 @@ class TestIntegration(unittest.TestCase):
                 # verify outputs
                 self.assertEqual(policy.shape, (1, 8, 8, 73))
                 self.assertEqual(value.shape, (1, 1))
+
+
+class DummyModel(torch.nn.Module):
+    """simple deterministic model for quick self-play tests."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        policy = torch.zeros(batch_size, 8, 8, 73, device=x.device)
+        policy = torch.log_softmax(policy, dim=-1)
+        value = torch.zeros(batch_size, 1, device=x.device)
+        return policy, value
+
+
+class TestSelfPlayAndReplayBuffer(unittest.TestCase):
+    """tests for self-play generation and replay buffer sampling."""
+
+    def test_self_play_generates_samples(self):
+        config = SelfPlayConfig(
+            num_simulations=2,
+            batch_size=2,
+            max_moves=10,
+            temperature_switch_move=2,
+            temperature_final=0.5,
+        )
+        with SelfPlayGame(model=DummyModel(), config=config) as runner:
+            samples = runner.run_game()
+
+        self.assertGreater(len(samples), 0)
+        for sample in samples:
+            self.assertEqual(sample.state.shape, (18, 8, 8))
+            self.assertEqual(sample.policy.shape, (8, 8, 73))
+            self.assertGreaterEqual(sample.value, -1.0)
+            self.assertLessEqual(sample.value, 1.0)
+
+    def test_replay_buffer_sampling(self):
+        config = SelfPlayConfig(
+            num_simulations=2,
+            batch_size=2,
+            max_moves=8,
+            temperature_switch_move=2,
+            temperature_final=0.5,
+        )
+        with SelfPlayGame(model=DummyModel(), config=config) as runner:
+            samples = runner.run_game()
+
+        self.assertGreater(len(samples), 0)
+
+        buffer = ReplayBuffer(capacity=16, seed=42)
+        buffer.extend(samples)
+        buffer.extend(samples)
+
+        batch_size = min(4, len(buffer))
+        states, policies, values = buffer.sample(batch_size)
+
+        self.assertEqual(states.shape, (batch_size, 18, 8, 8))
+        self.assertEqual(policies.shape, (batch_size, 8, 8, 73))
+        self.assertEqual(values.shape, (batch_size, 1))
 
 
 if __name__ == '__main__':

@@ -1,1 +1,1 @@
-move_to_action
+.E5, chess.D4)
