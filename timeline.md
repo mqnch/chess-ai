@@ -19,19 +19,19 @@ Phase 3 – Monte Carlo Tree Search (Weeks 3–4)
 
 
 Phase 4 – Self‑play and replay buffer (Week 5)
-- [ ] Self‑play loop (game.py): using your MCTS implementation, generate complete games. Sample moves from the MCTS visit distribution using a temperature parameter (>1.0 for early game, gradually annealed). Record (state, policy, value) tuples.
-- [ ] Replay buffer (replay_buffer.py): implement a fixed‑size dataset that stores these tuples and supports random sampling. Ensure thread‑safety if multiple workers push to the buffer concurrently.
+- [x] Self‑play loop (game.py): using your MCTS implementation, generate complete games. Sample moves from the MCTS visit distribution using a temperature parameter (>1.0 for early game, gradually annealed). Record (state, policy, value) tuples.
+- [x] Replay buffer (replay_buffer.py): implement a fixed‑size dataset that stores these tuples and supports random sampling. Ensure thread‑safety if multiple workers push to the buffer concurrently.
 
 
 Phase 5 – Training loop (Week 6)
-- [ ] Implement the training script (train.py): sample mini‑batches from the replay buffer, compute the loss (policy cross‑entropy plus value mean‑squared error), perform back‑propagation and update the network.
-- [ ] Learning rate schedule and optimizer: start with Adam or SGD; experiment with cyclic or step decays.
-- [ ] Validation: hold out a small portion of games for validation to monitor over‑fitting.
+- [x] Implement the training script (train.py): sample mini‑batches from the replay buffer, compute the loss (policy cross‑entropy plus value mean‑squared error), perform back‑propagation and update the network.
+- [x] Learning rate schedule and optimizer: start with Adam or SGD; experiment with cyclic or step decays.
+- [x] Validation: hold out a small portion of games for validation to monitor over‑fitting.
 
 
 Phase 6 – Evaluation and gating (Week 7)
-- [ ] Evaluator (eval.py): write an arena that pits two networks against each other using MCTS. Set a threshold for replacing the current best model (for example the new network must score >55 % over 20–50 games). Reuse the self‑play MCTS implementation.
-- [ ] Metrics: log win rates, draw rates, average game length and evaluation time.
+- [x] Evaluator (eval.py): write an arena that pits two networks against each other using MCTS. Set a threshold for replacing the current best model (for example the new network must score >55 % over 20–50 games). Reuse the self‑play MCTS implementation.
+- [x] Metrics: log win rates, draw rates, average game length and evaluation time.
 
 
 Phase 7 – Parallelization and scaling (Weeks 8–9)

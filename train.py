@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from torch.utils.tensorboard import SummaryWriter
 
 from replay_buffer import ReplayBuffer
@@ -45,6 +45,27 @@ class Trainer:
         self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=1000, gamma=0.1)
         
         self.writer = SummaryWriter(log_dir='logs/train')
+
+    def _prepare_batch(self, states, policies, values) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        ensure inputs are float32 tensors on the configured device.
+        """
+        if isinstance(states, torch.Tensor):
+            states = states.detach().clone().to(dtype=torch.float32, device=self.device)
+        else:
+            states = torch.tensor(states, dtype=torch.float32).to(self.device)
+
+        if isinstance(policies, torch.Tensor):
+            policies = policies.detach().clone().to(dtype=torch.float32, device=self.device)
+        else:
+            policies = torch.tensor(policies, dtype=torch.float32).to(self.device)
+
+        if isinstance(values, torch.Tensor):
+            values = values.detach().clone().to(dtype=torch.float32, device=self.device)
+        else:
+            values = torch.tensor(values, dtype=torch.float32).to(self.device)
+
+        return states, policies, values
         
     def compute_loss(self, pred_policy_logits, pred_value, target_policy, target_value):
         """
@@ -83,24 +104,7 @@ class Trainer:
         """
         self.model.train()
         
-        states, policies, values = batch
-        
-        # Convert to tensors
-        # Use detach().clone() to avoid UserWarning if inputs are already tensors
-        if isinstance(states, torch.Tensor):
-            states = states.detach().clone().to(dtype=torch.float32, device=self.device)
-        else:
-            states = torch.tensor(states, dtype=torch.float32).to(self.device)
-
-        if isinstance(policies, torch.Tensor):
-            policies = policies.detach().clone().to(dtype=torch.float32, device=self.device)
-        else:
-            policies = torch.tensor(policies, dtype=torch.float32).to(self.device)
-
-        if isinstance(values, torch.Tensor):
-            values = values.detach().clone().to(dtype=torch.float32, device=self.device)
-        else:
-            values = torch.tensor(values, dtype=torch.float32).to(self.device)
+        states, policies, values = self._prepare_batch(*batch)
         
         self.optimizer.zero_grad()
         
@@ -123,13 +127,51 @@ class Trainer:
             "lr": self.scheduler.get_last_lr()[0]
         }
 
-    def train_epoch(self, replay_buffer: ReplayBuffer, batch_size: int = 32, num_batches: int = 100):
+    def validate(self, replay_buffer: ReplayBuffer, batch_size: int = 64, num_batches: int = 20) -> Optional[Dict[str, float]]:
         """
-        Runs training for a specified number of batches.
+        evaluate the model on a held-out replay buffer split to monitor overfitting.
+        """
+        if len(replay_buffer) < batch_size:
+            logger.warning("not enough data in validation buffer to evaluate.")
+            return None
+
+        self.model.eval()
+        totals = {"total_loss": 0.0, "value_loss": 0.0, "policy_loss": 0.0}
+
+        with torch.no_grad():
+            for _ in range(num_batches):
+                batch = replay_buffer.sample(batch_size)
+                states, policies, values = self._prepare_batch(*batch)
+                pred_policies, pred_values = self.model(states)
+                value_loss, policy_loss = self.compute_loss(pred_policies, pred_values, policies, values)
+                totals["value_loss"] += value_loss.item()
+                totals["policy_loss"] += policy_loss.item()
+                totals["total_loss"] += (value_loss + policy_loss).item()
+
+        for key in totals:
+            totals[key] /= num_batches
+
+        logger.info(
+            f"validation complete. loss: {totals['total_loss']:.4f} "
+            f"(pol: {totals['policy_loss']:.4f}, val: {totals['value_loss']:.4f})"
+        )
+        return totals
+
+    def train_epoch(
+        self,
+        replay_buffer: ReplayBuffer,
+        batch_size: int = 32,
+        num_batches: int = 100,
+        val_buffer: Optional[ReplayBuffer] = None,
+        val_batch_size: Optional[int] = None,
+        val_batches: int = 20,
+    ) -> Optional[Dict[str, float]]:
+        """
+        runs training for a specified number of batches and optionally evaluates on a validation buffer.
         """
         if len(replay_buffer) < batch_size:
             logger.warning("Not enough data in replay buffer to train.")
-            return
+            return None
             
         total_metrics = {"total_loss": 0.0, "value_loss": 0.0, "policy_loss": 0.0}
         
@@ -146,6 +188,12 @@ class Trainer:
             total_metrics[k] /= num_batches
             
         logger.info(f"Epoch Complete. Loss: {total_metrics['total_loss']:.4f} (Pol: {total_metrics['policy_loss']:.4f}, Val: {total_metrics['value_loss']:.4f})")
+
+        if val_buffer is not None:
+            batch_size_val = val_batch_size or batch_size
+            val_metrics = self.validate(val_buffer, batch_size=batch_size_val, num_batches=val_batches)
+            return {"train": total_metrics, "validation": val_metrics}
+
         return total_metrics
 
     def save_checkpoint(self, path: str = "checkpoint.pth"):
