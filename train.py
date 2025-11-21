@@ -86,9 +86,21 @@ class Trainer:
         states, policies, values = batch
         
         # Convert to tensors
-        states = torch.tensor(states, dtype=torch.float32).to(self.device)
-        policies = torch.tensor(policies, dtype=torch.float32).to(self.device)
-        values = torch.tensor(values, dtype=torch.float32).to(self.device)
+        # Use detach().clone() to avoid UserWarning if inputs are already tensors
+        if isinstance(states, torch.Tensor):
+            states = states.detach().clone().to(dtype=torch.float32, device=self.device)
+        else:
+            states = torch.tensor(states, dtype=torch.float32).to(self.device)
+
+        if isinstance(policies, torch.Tensor):
+            policies = policies.detach().clone().to(dtype=torch.float32, device=self.device)
+        else:
+            policies = torch.tensor(policies, dtype=torch.float32).to(self.device)
+
+        if isinstance(values, torch.Tensor):
+            values = values.detach().clone().to(dtype=torch.float32, device=self.device)
+        else:
+            values = torch.tensor(values, dtype=torch.float32).to(self.device)
         
         self.optimizer.zero_grad()
         
