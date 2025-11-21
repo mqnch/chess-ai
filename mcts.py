@@ -1,47 +1,82 @@
+"""
+mcts.py
+
+Core implementation of the Monte Carlo Tree Search (MCTS) algorithm for the Chess AI.
+This module implements the search strategy described in `vision.md`, combining
+classical tree search with neural network guidance (PUCT).
+
+Key Components:
+- BatchInference: Orchestrates efficient GPU usage by batching requests from multiple workers.
+- MCTSNode: Represents the game state and search statistics.
+- MCTS: Implements the selection, expansion, evaluation, and backpropagation phases.
+
+References:
+    - Project Vision: "Core Components > mcts.py"
+    - AlphaZero Paper: "Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm"
+"""
+
 import math
 import queue
 import threading
-import time
 import numpy as np
 import torch
 import chess
-from encode import board_to_tensor, move_to_action, action_to_move, QUEEN_MOVE_OFFSET, KNIGHT_MOVE_OFFSET, UNDERPROMOTION_OFFSET
+from typing import List, Tuple, Dict, Optional, Any, Union
+
+from encode import board_to_tensor, move_to_action
+
+# --- Constants ---
+
+# Controls the level of exploration in the PUCT formula.
+# Higher values encourage exploring nodes with lower visit counts.
+DEFAULT_C_PUCT = 1.0
+
+# Dirichlet noise parameters for root node exploration (Phase 4 / Self-play).
+DEFAULT_DIRICHLET_ALPHA = 0.3
+DEFAULT_DIRICHLET_EPSILON = 0.25
+
 
 class BatchInference:
     """
-    Manages batched inference for multiple MCTS workers.
-    Collects states from workers, batches them, runs the neural network,
-    and distributes results back to the waiting workers.
+    Manages batched inference for multiple MCTS workers/threads.
+    
+    As described in `vision.md` ("Scaling and orchestration"), this class allows
+    multiple CPU workers to push states to a shared queue. A background thread
+    batches these states and queries the GPU-based `model.py` in one go, 
+    significantly improving throughput compared to sequential inference.
     """
-    def __init__(self, model, batch_size=8, device='cpu'):
+
+    def __init__(self, model: torch.nn.Module, batch_size: int = 8, device: str = 'cpu'):
         self.model = model
         self.batch_size = batch_size
-        self.device = device
-        self.queue = queue.Queue()
+        self.device = torch.device(device)
+        self.queue: queue.Queue = queue.Queue()
         self.running = True
+        
+        # Ensure model is in eval mode and on correct device
         self.model.to(self.device)
         self.model.eval()
         
-        # Start the inference thread
+        # Start the background inference thread
         self.thread = threading.Thread(target=self._inference_loop, daemon=True)
         self.thread.start()
 
     def _inference_loop(self):
         """
         Continuous loop that pulls from the queue, batches requests,
-        runs inference, and sets results.
+        runs the neural network, and distributes results.
         """
         while self.running:
             requests = []
             
-            # Get first item (blocking)
+            # 1. Blocking get for the first item (waits until at least one request exists)
             try:
                 req = self.queue.get(timeout=0.1)
                 requests.append(req)
             except queue.Empty:
                 continue
             
-            # Get more items to fill batch (non-blocking)
+            # 2. Non-blocking get for subsequent items to fill the batch
             while len(requests) < self.batch_size:
                 try:
                     req = self.queue.get_nowait()
@@ -52,115 +87,160 @@ class BatchInference:
             if not requests:
                 continue
                 
-            # Prepare batch
+            # 3. Prepare batch
+            # Assuming req['state'] is a ChessGame object or similar wrapper
             states = [req['state'] for req in requests]
             
-            # Run inference
+            # 4. Run inference (no_grad for efficiency)
             with torch.no_grad():
+                # Convert all boards to a single tensor batch
                 batch_tensor = torch.stack([board_to_tensor(s.board) for s in states]).to(self.device)
+                
+                # Model outputs: policy (logits), value (scalar)
                 policies, values = self.model(batch_tensor)
                 
-                # Move to CPU/numpy for easier handling
+                # Move to CPU/numpy for easier handling in MCTS
                 policies = policies.cpu().numpy()
                 values = values.cpu().numpy()
             
-            # Distribute results
+            # 5. Distribute results back to waiting threads
             for i, req in enumerate(requests):
                 req['result'] = (policies[i], values[i])
                 req['event'].set()
 
-    def predict(self, state):
+    def predict(self, state: Any) -> Tuple[np.ndarray, np.ndarray]:
         """
         Thread-safe method to request inference for a single state.
-        Blocks until the result is available.
+        Blocks until the batch containing this request is processed.
+        
+        Args:
+            state: The game state object (must have a .board attribute).
+            
+        Returns:
+            Tuple of (policy_logits, value).
         """
         event = threading.Event()
         req = {'state': state, 'event': event, 'result': None}
         self.queue.put(req)
-        event.wait()
+        event.wait() # Block until result is ready
         return req['result']
 
     def stop(self):
+        """Stops the inference thread."""
         self.running = False
         self.thread.join()
 
+
 class MCTSNode:
     """
-    Represents a node in the MCTS tree.
+    Represents a node in the Monte Carlo Search Tree.
+    
+    Attributes:
+        state: The game state corresponding to this node.
+        parent: The parent MCTSNode (None for root).
+        action: The action (move) taken to reach this node from parent.
+        children: Dictionary mapping actions to child MCTSNodes.
+        visit_count (N): Number of times this node has been visited.
+        value_sum (W): Sum of value estimates for this node.
+        prior (P): Prior probability of picking this action (from neural net).
     """
-    def __init__(self, state, parent=None, action=None, prior=0.0):
+    def __init__(self, state: Any, parent: Optional['MCTSNode'] = None, 
+                 action: Optional[chess.Move] = None, prior: float = 0.0):
         self.state = state
         self.parent = parent
         self.action = action
-        self.children = {}  # Map from action to MCTSNode
+        self.children: Dict[chess.Move, 'MCTSNode'] = {}
         
         self.visit_count = 0
         self.value_sum = 0.0
-        self.prior = prior  # P(s, a)
+        self.prior = prior
         
     @property
-    def value(self):
-        """Mean value of the node."""
+    def value(self) -> float:
+        """Mean action value (Q = W / N)."""
         if self.visit_count == 0:
-            return 0
+            return 0.0
         return self.value_sum / self.visit_count
 
-    def is_expanded(self):
+    def is_expanded(self) -> bool:
+        """Returns True if the node has been expanded (has children)."""
         return len(self.children) > 0
+    
+    def __repr__(self):
+        return f"<MCTSNode N={self.visit_count} Q={self.value:.3f} P={self.prior:.3f}>"
+
 
 class MCTS:
     """
-    Monte Carlo Tree Search implementation using PUCT.
+    Monte Carlo Tree Search (MCTS) implementation using the PUCT algorithm.
+    
+    As outlined in `vision.md`, this class coordinates the four phases of search:
+    1. Selection
+    2. Expansion
+    3. Evaluation
+    4. Backpropagation
     """
-    def __init__(self, inference_service, c_puct=1.0, dirichlet_alpha=0.3, dirichlet_epsilon=0.25):
+
+    def __init__(self, inference_service: BatchInference, 
+                 c_puct: float = DEFAULT_C_PUCT, 
+                 dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA, 
+                 dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON):
         self.inference_service = inference_service
         self.c_puct = c_puct
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
 
-    def search(self, root, num_simulations=800):
+    def search(self, root: Union[MCTSNode, Any], num_simulations: int = 800) -> MCTSNode:
         """
         Performs MCTS simulations starting from the root state.
+        
+        Args:
+            root: The root MCTSNode or a game state object.
+            num_simulations: Number of simulations to run (default 800, adjustable per `vision.md` scaling).
+            
+        Returns:
+            The root MCTSNode with updated statistics.
         """
-        # Initialize root node if it's just a state
+        # Ensure root is a node
         if not isinstance(root, MCTSNode):
             root = MCTSNode(root, prior=1.0)
             
-        # Add exploration noise to root if it's not expanded yet or we want to refresh it
-        # Typically noise is added once at the beginning of the search for the root
+        # Initial expansion with noise if needed (Phase 4: Exploration)
         if not root.is_expanded():
              self._expand(root, add_noise=True)
 
         for _ in range(num_simulations):
             node = root
             
-            # 1. Selection
+            # 1. Selection: Traverse tree to a leaf node
             while node.is_expanded():
                 child = self._select_child(node)
                 if child is None:
+                    # Should be rare, but protects against empty children dicts
                     break
                 node = child
             
-            # 2. Expansion & 3. Evaluation
+            # 2. Expansion & 3. Evaluation: Expand leaf and get value
             value = self._expand(node)
             
-            # 4. Backpropagation
+            # 4. Backpropagation: Update stats up the tree
             self._backpropagate(node, value)
             
         return root
 
-    def _select_child(self, node):
+    def _select_child(self, node: MCTSNode) -> Optional[MCTSNode]:
         """
         Selects the child with the highest PUCT score.
+        Formula: U(s,a) = Q(s,a) + C_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a))
         """
         best_score = -float('inf')
         best_child = None
         
-        # Precompute sqrt(sum(N)) for PUCT formula
         sqrt_total_visits = math.sqrt(node.visit_count)
         
         for action, child in node.children.items():
             q_value = child.value
+            # PUCT calculation
             u_value = self.c_puct * child.prior * sqrt_total_visits / (1 + child.visit_count)
             score = q_value + u_value
             
@@ -170,77 +250,85 @@ class MCTS:
                 
         return best_child
 
-    def _expand(self, node, add_noise=False):
+    def _expand(self, node: MCTSNode, add_noise: bool = False) -> float:
         """
-        Expands the leaf node using the neural network.
-        Returns the value of the state (from network or terminal condition).
+        Expands a leaf node using the neural network.
+        
+        Responsibilities:
+        - Check for terminal states (game over).
+        - Query `inference_service` for Policy (priors) and Value.
+        - Mask invalid moves and normalize policy.
+        - Create child nodes for all valid moves.
+        
+        Returns:
+            The value estimate (v) of the state.
         """
         state = node.state
         
-        # Check if terminal
+        # Handle Terminal States
         if state.is_terminal():
-            # get_result returns '1-0', '0-1', '1/2-1/2'
-            # We need to convert this to value from the perspective of the current player
-            # Note: Model predicts value for the player whose turn it is.
-            # If white wins (1), and it's white's turn, value is 1.
-            # If white wins (1), and it's black's turn, value is -1.
-            
-            winner = state.get_winner() # 1 (white), -1 (black), 0 (draw), None (not over)
+            # Get result: 1 (White win), -1 (Black win), 0 (Draw)
+            winner = state.get_winner()
             if winner is None:
-                # Should not happen if is_terminal is true
-                return 0 
+                return 0.0
             
-            # Value is from the perspective of the player to move *in the parent state*?
-            # Usually standard AlphaZero: Value is for the player to move in current state 's'.
-            # If s is terminal, value is simple.
-            
-            # If it is White's turn, and White wins, value is +1.
-            # If it is Black's turn, and Black wins (winner=-1), value is +1 (good for Black).
+            # Value is from the perspective of the player who just moved (parent node's actor).
+            # If it's White's turn in `state`, then Black just moved.
+            # Standard AlphaZero: value is relative to the current player in `state`.
+            # If state.turn == WHITE and winner == 1, value = 1.
+            # If state.turn == BLACK and winner == 1, value = -1 (White won, bad for Black).
             
             turn_multiplier = 1 if state.get_turn() == chess.WHITE else -1
             return winner * turn_multiplier
 
-        # Inference
+        # Inference: Get raw policy logits and value from the network
         policy_logits, value = self.inference_service.predict(state)
-        value = value[0] # Extract scalar
+        value = value[0] # Unpack scalar from (1,) array
         
-        # Generate legal moves and corresponding probabilities
+        # Legal Move Masking & Policy normalization
         legal_moves = state.get_legal_moves()
         policy_map = {}
         
-        # Convert logits to probabilities for legal moves only
-        # policy_logits shape is (8, 8, 73)
-        
         for move in legal_moves:
-            action_tuple = move_to_action(move, state.board)
-            if action_tuple is None:
-                continue
-            from_sq, action_type = action_tuple
-            # from_sq is 0-63, action_type is 0-72
+            # Convert move to action index (0-4671)
+            action_data = move_to_action(move, state.board)
             
-            # Map 0-63 from_sq to row/col
+            # Robustness check: move_to_action returns None for unencodable moves
+            if action_data is None:
+                continue
+                
+            from_sq, action_type = action_data
+            
+            # Map linear action index to 8x8x73 tensor coordinates
             r = from_sq // 8
             c = from_sq % 8
             
             logit = policy_logits[r, c, action_type]
             policy_map[move] = logit
             
-        # Softmax over legal moves
+        # Softmax over ONLY legal moves (prevents exploring illegal actions)
+        # Uses log-sum-exp trick for numerical stability
         max_logit = max(policy_map.values()) if policy_map else 0
         sum_exp = sum(math.exp(logit - max_logit) for logit in policy_map.values())
         
-        # Dirichlet noise parameters
+        # Add Dirichlet noise to the root (if requested) to encourage exploration
+        noise = None
         if add_noise:
             noise = np.random.dirichlet([self.dirichlet_alpha] * len(legal_moves))
         
+        # Create children
         for i, move in enumerate(legal_moves):
+            if move not in policy_map:
+                continue
+                
+            # Calculate probability
             prob = math.exp(policy_map[move] - max_logit) / sum_exp
             
-            if add_noise:
+            # Mix in noise
+            if add_noise and noise is not None:
                 prob = (1 - self.dirichlet_epsilon) * prob + self.dirichlet_epsilon * noise[i]
             
-            # Create child node
-            # We need to create a new state for the child
+            # Advance state for child
             next_state = state.copy()
             next_state.make_move(move)
             
@@ -249,47 +337,54 @@ class MCTS:
             
         return value
 
-    def _backpropagate(self, node, value):
+    def _backpropagate(self, node: MCTSNode, value: float):
         """
-        Updates the node statistics along the path to the root.
-        Value is from the perspective of the player at the leaf node.
+        Backpropagates the value estimate up the tree.
+        
+        Since Chess is a zero-sum game, the value flips sign at each level:
+        If state S is +1 for White, the parent (Black's turn) sees it as -1.
         """
         curr = node
         while curr is not None:
             curr.visit_count += 1
             curr.value_sum += value
             
-            # The value is relative to the player who just moved (or the player to move at this node?)
-            # AlphaZero convention:
-            # v is the value for the player to move at state s.
-            # When moving up the tree, the player to move switches.
-            # So we negate the value.
-            
             value = -value
             curr = curr.parent
 
-    def get_action_prob(self, root, temperature=1.0):
+    def get_action_prob(self, root: MCTSNode, temperature: float = 1.0) -> Tuple[List[chess.Move], List[float]]:
         """
-        Returns the action probabilities from the root node visits.
-        """
-        visits = [child.visit_count for child in root.children.values()]
-        actions = [action for action in root.children.keys()]
+        Returns the action probabilities based on visit counts.
         
-        if sum(visits) == 0:
-             # Should not happen if searched
-             return actions, [1/len(actions)] * len(actions)
+        Args:
+            root: The root MCTSNode after searching.
+            temperature: Controls the shape of the distribution.
+                         1.0 = proportional to visits (standard).
+                         0.0 = greedy (max visits).
+                         >1.0 = flatter distribution (more exploration).
+                         
+        Returns:
+            Tuple of (actions, probabilities).
+        """
+        actions = list(root.children.keys())
+        visits = [child.visit_count for child in root.children.values()]
+        
+        if not visits:
+             return actions, []
         
         if temperature == 0:
-            # Greedy selection
+            # Greedy: Return 1.0 for the max-visit action(s)
             max_visit = max(visits)
-            best_actions = [a for a, v in zip(actions, visits) if v == max_visit]
-            probs = [1.0 / len(best_actions) if a in best_actions else 0.0 for a in actions]
+            best_indices = [i for i, v in enumerate(visits) if v == max_visit]
+            probs = [0.0] * len(actions)
+            for i in best_indices:
+                probs[i] = 1.0 / len(best_indices)
             return actions, probs
 
-        # Apply temperature
-        visits = [v ** (1.0 / temperature) for v in visits]
-        sum_visits = sum(visits)
-        probs = [v / sum_visits for v in visits]
+        # Softmax-like scaling with temperature
+        # v^(1/T)
+        visits_powered = [v ** (1.0 / temperature) for v in visits]
+        sum_visits = sum(visits_powered)
+        probs = [v / sum_visits for v in visits_powered]
         
         return actions, probs
-
