@@ -136,7 +136,10 @@ class MCTS:
             
             # 1. Selection
             while node.is_expanded():
-                node = self._select_child(node)
+                child = self._select_child(node)
+                if child is None:
+                    break
+                node = child
             
             # 2. Expansion & 3. Evaluation
             value = self._expand(node)
@@ -209,7 +212,10 @@ class MCTS:
         # policy_logits shape is (8, 8, 73)
         
         for move in legal_moves:
-            from_sq, action_type = move_to_action(move, state.board)
+            action_tuple = move_to_action(move, state.board)
+            if action_tuple is None:
+                continue
+            from_sq, action_type = action_tuple
             # from_sq is 0-63, action_type is 0-72
             
             # Map 0-63 from_sq to row/col
