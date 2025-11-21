@@ -7,7 +7,8 @@ import chess.svg
 try:
     import cairosvg
     HAS_CAIROSVG = True
-except ImportError:
+except (ImportError, OSError):
+    # OSError catches missing GTK+ DLLs on Windows
     HAS_CAIROSVG = False
     try:
         from PIL import Image
