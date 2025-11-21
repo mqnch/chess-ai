@@ -73,7 +73,7 @@ def test_returns_legal_move():
     for move in actions:
         assert move in legal_moves, f"Illegal move returned: {move}"
 
-    print("  ✓ All returned moves are legal")
+    print("  All returned moves are legal")
     inference.stop()
 
 
@@ -90,7 +90,7 @@ def test_distribution_not_empty():
     s = sum(probs)
     assert abs(s - 1.0) < 1e-3, f"Probabilities should sum to 1, got {s}"
 
-    print("  ✓ Non-empty distribution, probabilities sum to ~1")
+    print(" Non-empty distribution, probabilities sum to ~1")
     inference.stop()
 
 
@@ -109,7 +109,7 @@ def test_root_invariance():
 
     assert len(a1) == len(a2), "Different number of actions from identical positions"
 
-    print("  ✓ Action set size is consistent across runs")
+    print("  Action set size is consistent across runs")
     inference.stop()
 
 
@@ -126,7 +126,7 @@ def test_node_consistency():
         assert child.state.board.fen() == expected.board.fen(), \
             f"Child state FEN mismatch for move {move}"
 
-    print("  ✓ All child nodes match expected next-board states")
+    print("  All child nodes match expected next-board states")
     inference.stop()
 
 
@@ -146,7 +146,7 @@ def test_terminal_propagation_draw():
         assert abs(child.value) < 1e-3, \
             f"Child value should be ~0 in drawn position, got {child.value}"
 
-    print("  ✓ Values around 0 for draw position")
+    print("  Values around 0 for draw position")
     inference.stop()
 
 
@@ -171,7 +171,7 @@ def test_terminal_propagation_mate_in_one():
     # so you can adjust this assertion to your actual known mate move.
     # Example: assert str(best_move) == "g1f1"
 
-    print("  ✓ MCTS finds a strong move in tactical position (manual check above)")
+    print("  MCTS finds a strong move in tactical position (manual check above)")
     inference.stop()
 
 
@@ -203,7 +203,7 @@ def test_full_game_self_play(max_moves=200):
         move_count += 1
 
     print(f"  Game finished after {move_count} moves. Result: {state.get_result()}")
-    print("  ✓ Self-play game ran to completion (or max_moves) without crashes")
+    print("  Self-play game ran to completion (or max_moves) without crashes")
     inference.stop()
 
 
@@ -224,7 +224,7 @@ def test_batch_inference_stress():
     for t in threads:
         t.join()
 
-    print("  ✓ BatchInference handled concurrent requests without crashing")
+    print("  BatchInference handled concurrent requests without crashing")
     inference.stop()
 
 
