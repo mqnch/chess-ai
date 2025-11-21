@@ -1,7 +1,20 @@
 import pygame
 import sys
+import io
 from board import ChessGame
 import chess
+import chess.svg
+try:
+    import cairosvg
+    HAS_CAIROSVG = True
+except ImportError:
+    HAS_CAIROSVG = False
+    try:
+        from PIL import Image
+        import xml.etree.ElementTree as ET
+        HAS_PIL = True
+    except ImportError:
+        HAS_PIL = False
 
 
 # color constants
@@ -17,20 +30,12 @@ TEXT_COLOR = (50, 50, 50)
 # board dimensions
 BOARD_SIZE = 640
 SQUARE_SIZE = BOARD_SIZE // 8
-MARGIN = 20
+MARGIN = 40
 INFO_WIDTH = 200
-WINDOW_WIDTH = BOARD_SIZE + MARGIN * 2 + INFO_WIDTH
-WINDOW_HEIGHT = BOARD_SIZE + MARGIN * 2
+WINDOW_WIDTH = 1000
+WINDOW_HEIGHT = 720
 
-# unicode chess piece symbols
-PIECE_SYMBOLS = {
-    chess.PAWN: {chess.WHITE: '♙', chess.BLACK: '♟'},
-    chess.KNIGHT: {chess.WHITE: '♘', chess.BLACK: '♞'},
-    chess.BISHOP: {chess.WHITE: '♗', chess.BLACK: '♝'},
-    chess.ROOK: {chess.WHITE: '♖', chess.BLACK: '♜'},
-    chess.QUEEN: {chess.WHITE: '♕', chess.BLACK: '♛'},
-    chess.KING: {chess.WHITE: '♔', chess.BLACK: '♚'},
-}
+# piece image cache will be populated during initialization
 
 
 class ChessVisualizer:
@@ -46,9 +51,9 @@ class ChessVisualizer:
         pygame.display.set_caption("Chess AI - Visual Interface")
         
         # initialize font
-        self.font_large = pygame.font.Font(None, 72)
-        self.font_medium = pygame.font.Font(None, 36)
-        self.font_small = pygame.font.Font(None, 24)
+        self.font_large = pygame.font.Font("public/inter.ttf", 72)
+        self.font_medium = pygame.font.Font("public/inter.ttf", 36)
+        self.font_small = pygame.font.Font("public/inter.ttf", 18)
         
         # game state
         self.game = ChessGame()
@@ -58,6 +63,10 @@ class ChessVisualizer:
         
         # game mode: 'human_vs_human' or 'human_vs_ai'
         self.game_mode = 'human_vs_human'
+        
+        # load and cache piece images from chess.svg
+        self.piece_images = {}
+        self._load_piece_images()
     
     def square_to_pixel(self, square):
         """
@@ -98,6 +107,56 @@ class ChessVisualizer:
         
         return row * 8 + col
     
+    def _load_piece_images(self):
+        """load chess piece images from chess.svg and cache them as pygame surfaces."""
+        piece_size = int(SQUARE_SIZE * 0.9)  # slightly smaller than square
+        
+        piece_types = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
+        colors = [chess.WHITE, chess.BLACK]
+        
+        for piece_type in piece_types:
+            for color in colors:
+                svg_string = chess.svg.piece(chess.Piece(piece_type, color), size=piece_size)
+
+                if HAS_CAIROSVG:
+                    png_bytes = cairosvg.svg2png(bytestring=svg_string.encode('utf-8'))
+                    png_file = io.BytesIO(png_bytes)
+
+                    surface = pygame.image.load(png_file)
+                    surface = surface.convert_alpha()
+
+                else:
+                    # fallback to unicode
+                    surface = self._create_unicode_piece(piece_type, color, piece_size)
+                    
+                self.piece_images[(piece_type, color)] = surface
+        
+                    
+    def _create_unicode_piece(self, piece_type, color, size):
+        """create a pygame surface with unicode piece symbol as fallback."""
+        unicode_symbols = {
+            (chess.PAWN, chess.WHITE): '♙',
+            (chess.PAWN, chess.BLACK): '♟',
+            (chess.KNIGHT, chess.WHITE): '♘',
+            (chess.KNIGHT, chess.BLACK): '♞',
+            (chess.BISHOP, chess.WHITE): '♗',
+            (chess.BISHOP, chess.BLACK): '♝',
+            (chess.ROOK, chess.WHITE): '♖',
+            (chess.ROOK, chess.BLACK): '♜',
+            (chess.QUEEN, chess.WHITE): '♕',
+            (chess.QUEEN, chess.BLACK): '♛',
+            (chess.KING, chess.WHITE): '♔',
+            (chess.KING, chess.BLACK): '♚',
+        }
+        
+        symbol = unicode_symbols.get((piece_type, color), '?')
+        surface = pygame.Surface((size, size), pygame.SRCALPHA)
+        font = pygame.font.Font(None, size)
+        text_surface = font.render(symbol, True, BLACK if color == chess.WHITE else WHITE)
+        text_rect = text_surface.get_rect(center=(size // 2, size // 2))
+        surface.blit(text_surface, text_rect)
+        return surface
+    
     def draw_board(self):
         """draw the chess board with alternating square colors."""
         for row in range(8):
@@ -119,19 +178,20 @@ class ChessVisualizer:
                 pygame.draw.rect(self.screen, color, (x, y, SQUARE_SIZE, SQUARE_SIZE))
     
     def draw_pieces(self):
-        """draw chess pieces on the board."""
+        """draw chess pieces on the board using chess.svg icons."""
         board = self.game.get_board()
         
         for square in chess.SQUARES:
             piece = board.piece_at(square)
             if piece is not None:
-                symbol = PIECE_SYMBOLS[piece.piece_type][piece.color]
-                x, y = self.square_to_pixel(square)
-                
-                # center the piece in the square
-                text_surface = self.font_large.render(symbol, True, BLACK if piece.color == chess.WHITE else WHITE)
-                text_rect = text_surface.get_rect(center=(x + SQUARE_SIZE // 2, y + SQUARE_SIZE // 2))
-                self.screen.blit(text_surface, text_rect)
+                # get cached piece image
+                piece_image = self.piece_images.get((piece.piece_type, piece.color))
+                if piece_image is not None:
+                    x, y = self.square_to_pixel(square)
+                    
+                    # center the piece in the square
+                    piece_rect = piece_image.get_rect(center=(x + SQUARE_SIZE // 2, y + SQUARE_SIZE // 2))
+                    self.screen.blit(piece_image, piece_rect)
     
     def draw_info_panel(self):
         """draw information panel on the right side."""

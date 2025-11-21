@@ -1,0 +1,8 @@
+cairosvg
+pygame
+chess
+chess.svg
+torch
+torchvision
+numpy
+matplotlib
