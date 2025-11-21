@@ -169,3 +169,223 @@ def tensor_to_board_state(tensor):
     # the board will have default values for these
     
     return board
+
+
+# move encoding constants for 8×8×73 policy representation
+# 73 action types per square:
+# - 0-55: queen-like moves (8 directions × 7 squares max)
+# - 56-63: knight moves (8 directions)
+# - 64-72: underpromotions (3 piece types × 3 directions)
+QUEEN_MOVE_OFFSET = 0
+KNIGHT_MOVE_OFFSET = 56
+UNDERPROMOTION_OFFSET = 64
+
+# directions for queen moves: N, NE, E, SE, S, SW, W, NW
+QUEEN_DIRECTIONS = [
+    (-1, 0),   # N
+    (-1, 1),   # NE
+    (0, 1),    # E
+    (1, 1),    # SE
+    (1, 0),    # S
+    (1, -1),   # SW
+    (0, -1),   # W
+    (-1, -1)   # NW
+]
+
+# directions for knight moves
+KNIGHT_MOVES = [
+    (-2, -1), (-2, 1), (-1, -2), (-1, 2),
+    (1, -2), (1, 2), (2, -1), (2, 1)
+]
+
+# underpromotion piece types (knight, bishop, rook)
+UNDERPROMOTION_PIECES = [chess.KNIGHT, chess.BISHOP, chess.ROOK]
+UNDERPROMOTION_DIRECTIONS = [(-1, 0), (-1, -1), (-1, 1)]  # straight, left-diagonal, right-diagonal
+
+
+def move_to_action(move, board):
+    """
+    convert a chess.Move to (from_square, action_type) tuple for 8×8×73 encoding.
+    
+    args:
+        move: chess.Move object
+        board: chess.Board object (needed for context like promotions)
+    
+    returns:
+        tuple (from_square, action_type) where:
+        - from_square: 0-63 (square index)
+        - action_type: 0-72 (action type index)
+    """
+    from_square = move.from_square
+    to_square = move.to_square
+    
+    # convert squares to (row, col) coordinates
+    from_row = from_square // 8
+    from_col = from_square % 8
+    to_row = to_square // 8
+    to_col = to_square % 8
+    
+    # calculate direction and distance
+    dr = to_row - from_row
+    dc = to_col - from_col
+    
+    # handle promotions (including underpromotions)
+    if move.promotion and move.promotion != chess.QUEEN:
+        # underpromotion: piece type and direction
+        piece_idx = UNDERPROMOTION_PIECES.index(move.promotion)
+        # determine direction: straight, left-diagonal, or right-diagonal
+        if dc == 0:
+            dir_idx = 0  # straight
+        elif dc < 0:
+            dir_idx = 1  # left-diagonal
+        else:
+            dir_idx = 2  # right-diagonal
+        action_type = UNDERPROMOTION_OFFSET + piece_idx * 3 + dir_idx
+        return (from_square, action_type)
+    
+    # handle knight moves
+    if abs(dr) == 2 and abs(dc) == 1 or abs(dr) == 1 and abs(dc) == 2:
+        # find matching knight move direction
+        for i, (kr, kc) in enumerate(KNIGHT_MOVES):
+            if kr == dr and kc == dc:
+                action_type = KNIGHT_MOVE_OFFSET + i
+                return (from_square, action_type)
+    
+    # handle queen-like moves (including regular moves and queen promotions)
+    # normalize direction
+    if dr != 0:
+        dr_norm = dr // abs(dr)
+    else:
+        dr_norm = 0
+    if dc != 0:
+        dc_norm = dc // abs(dc)
+    else:
+        dc_norm = 0
+    
+    # find matching direction
+    dir_idx = -1
+    for i, (qr, qc) in enumerate(QUEEN_DIRECTIONS):
+        if qr == dr_norm and qc == dc_norm:
+            dir_idx = i
+            break
+    
+    if dir_idx == -1:
+        # fallback: should not happen for valid moves
+        return None
+    
+    # calculate distance (1-7)
+    distance = max(abs(dr), abs(dc))
+    if distance < 1 or distance > 7:
+        return None
+    
+    action_type = QUEEN_MOVE_OFFSET + dir_idx * 7 + (distance - 1)
+    return (from_square, action_type)
+
+
+def action_to_move(from_square, action_type, board):
+    """
+    convert (from_square, action_type) back to a chess.Move object.
+    
+    args:
+        from_square: 0-63 (square index)
+        action_type: 0-72 (action type index)
+        board: chess.Board object (needed for legal move validation)
+    
+    returns:
+        chess.Move object, or None if invalid
+    """
+    from_row = from_square // 8
+    from_col = from_square % 8
+    
+    # handle underpromotions (64-72)
+    if action_type >= UNDERPROMOTION_OFFSET:
+        idx = action_type - UNDERPROMOTION_OFFSET
+        piece_idx = idx // 3
+        dir_idx = idx % 3
+        
+        promotion_piece = UNDERPROMOTION_PIECES[piece_idx]
+        dr, dc = UNDERPROMOTION_DIRECTIONS[dir_idx]
+        
+        to_row = from_row + dr
+        to_col = from_col + dc
+        
+        # underpromotions only happen on rank 7 (for white) or rank 0 (for black)
+        if to_row < 0 or to_row >= 8 or to_col < 0 or to_col >= 8:
+            return None
+        
+        to_square = to_row * 8 + to_col
+        
+        # try to create move with promotion
+        try:
+            move = chess.Move(from_square, to_square, promotion=promotion_piece)
+            if move in board.legal_moves:
+                return move
+        except:
+            pass
+        return None
+    
+    # handle knight moves (56-63)
+    if action_type >= KNIGHT_MOVE_OFFSET and action_type < UNDERPROMOTION_OFFSET:
+        idx = action_type - KNIGHT_MOVE_OFFSET
+        dr, dc = KNIGHT_MOVES[idx]
+        to_row = from_row + dr
+        to_col = from_col + dc
+        
+        if to_row < 0 or to_row >= 8 or to_col < 0 or to_col >= 8:
+            return None
+        
+        to_square = to_row * 8 + to_col
+        
+        # check if it's a promotion (knight move to promotion square)
+        if (to_row == 0 or to_row == 7) and board.piece_at(from_square) and \
+           board.piece_at(from_square).piece_type == chess.PAWN:
+            # try with queen promotion first
+            try:
+                move = chess.Move(from_square, to_square, promotion=chess.QUEEN)
+                if move in board.legal_moves:
+                    return move
+            except:
+                pass
+        
+        try:
+            move = chess.Move(from_square, to_square)
+            if move in board.legal_moves:
+                return move
+        except:
+            pass
+        return None
+    
+    # handle queen-like moves (0-55)
+    if action_type < KNIGHT_MOVE_OFFSET:
+        dir_idx = action_type // 7
+        distance = (action_type % 7) + 1
+        
+        dr, dc = QUEEN_DIRECTIONS[dir_idx]
+        to_row = from_row + dr * distance
+        to_col = from_col + dc * distance
+        
+        if to_row < 0 or to_row >= 8 or to_col < 0 or to_col >= 8:
+            return None
+        
+        to_square = to_row * 8 + to_col
+        
+        # check if it's a promotion (pawn move to promotion square)
+        if (to_row == 0 or to_row == 7) and board.piece_at(from_square) and \
+           board.piece_at(from_square).piece_type == chess.PAWN:
+            # try with queen promotion
+            try:
+                move = chess.Move(from_square, to_square, promotion=chess.QUEEN)
+                if move in board.legal_moves:
+                    return move
+            except:
+                pass
+        
+        try:
+            move = chess.Move(from_square, to_square)
+            if move in board.legal_moves:
+                return move
+        except:
+            pass
+        return None
+    
+    return None
