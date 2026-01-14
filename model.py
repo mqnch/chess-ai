@@ -63,7 +63,8 @@ class ChessNet(nn.Module):
         # value head: outputs single scalar value
         self.value_conv = nn.Conv2d(num_channels, 1, kernel_size=1)
         self.value_fc1 = nn.Linear(8 * 8, 256)
-        self.value_fc2 = nn.Linear(256, 1)
+        self.value_fc2 = nn.Linear(256, 128)
+        self.value_fc3 = nn.Linear(128, 1)
         
         # initialize weights
         self._initialize_weights()
@@ -85,6 +86,11 @@ class ChessNet(nn.Module):
                 nn.init.xavier_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+        # encourage the value head to start near zero but not collapse
+        if hasattr(self, "value_fc3"):
+            nn.init.normal_(self.value_fc3.weight, mean=0.0, std=0.01)
+            if self.value_fc3.bias is not None:
+                nn.init.constant_(self.value_fc3.bias, 0.0)
         
         # special initialization for value head final layer to help it learn
         # initialize to small random values so it doesn't start at exactly 0
@@ -119,8 +125,9 @@ class ChessNet(nn.Module):
         # value head
         value = self.value_conv(x)  # (batch_size, 1, 8, 8)
         value = value.view(value.size(0), -1)  # (batch_size, 64)
-        value = F.relu(self.value_fc1(value))  # (batch_size, 256)
-        value = torch.tanh(self.value_fc2(value))  # (batch_size, 1)
+        value = F.leaky_relu(self.value_fc1(value), negative_slope=0.1)  # (batch_size, 256)
+        value = F.leaky_relu(self.value_fc2(value), negative_slope=0.1)  # (batch_size, 128)
+        value = torch.tanh(self.value_fc3(value))  # (batch_size, 1)
         
         return policy, value
 

@@ -30,41 +30,47 @@ class Trainer:
     Manages the training process for the ChessNet.
     """
     
-    def __init__(self, model: ChessNet, device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-                 learning_rate: float = 0.02, weight_decay: float = 1e-4):
+    def __init__(
+        self,
+        model: ChessNet,
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        learning_rate: float = 0.02,
+        weight_decay: float = 1e-4,
+        value_loss_weight: float = 1.0,
+    ):
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device)
+        self.value_loss_weight = value_loss_weight
         
-        # Optimizer: SGD with momentum is standard for AlphaZero, but Adam is often easier for smaller scale.
-        # Vision.md suggests "start with Adam or SGD".
+        # Optimizer: SGD with momentum is standard for AlphaZero.
         self.optimizer = optim.SGD(self.model.parameters(), lr=learning_rate, 
                                    momentum=0.9, weight_decay=weight_decay)
         
-        # Scheduler: Step decay or Cyclic
-        # Using a simple StepLR for now
+        # Scheduler: Step decay
         self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=1000, gamma=0.1)
         
         self.writer = SummaryWriter(log_dir='logs/train')
+        self.mse_loss = nn.MSELoss()
 
     def _prepare_batch(self, states, policies, values) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         ensure inputs are float32 tensors on the configured device.
         """
-        if isinstance(states, torch.Tensor):
-            states = states.detach().clone().to(dtype=torch.float32, device=self.device)
-        else:
-            states = torch.tensor(states, dtype=torch.float32).to(self.device)
+        if not isinstance(states, torch.Tensor):
+            states = torch.tensor(states, dtype=torch.float32)
+        if states.device != self.device:
+            states = states.to(self.device, non_blocking=True)
 
-        if isinstance(policies, torch.Tensor):
-            policies = policies.detach().clone().to(dtype=torch.float32, device=self.device)
-        else:
-            policies = torch.tensor(policies, dtype=torch.float32).to(self.device)
+        if not isinstance(policies, torch.Tensor):
+            policies = torch.tensor(policies, dtype=torch.float32)
+        if policies.device != self.device:
+            policies = policies.to(self.device, non_blocking=True)
 
-        if isinstance(values, torch.Tensor):
-            values = values.detach().clone().to(dtype=torch.float32, device=self.device)
-        else:
-            values = torch.tensor(values, dtype=torch.float32).to(self.device)
+        if not isinstance(values, torch.Tensor):
+            values = torch.tensor(values, dtype=torch.float32)
+        if values.device != self.device:
+            values = values.to(self.device, non_blocking=True)
 
         return states, policies, values
         
@@ -72,29 +78,16 @@ class Trainer:
         """
         Computes the AlphaZero loss function:
         L = (z - v)^2 - pi^T * log(p) + c||theta||^2
-        
-        where:
-        - (z - v)^2 is Mean Squared Error for value (z=target, v=pred)
-        - -pi^T * log(p) is Cross Entropy for policy (pi=target, p=pred)
-        - L2 regularization is handled by the optimizer's weight_decay
         """
         # Value Loss (MSE)
-        # pred_value shape: (batch, 1), target_value shape: (batch,) -> unsqueeze target
-        value_loss = nn.MSELoss()(pred_value.view(-1), target_value.view(-1))
+        value_loss = self.mse_loss(pred_value.view(-1), target_value.view(-1))
         
         # Policy Loss (Cross Entropy)
-        # pred_policy_logits: (batch, 8, 8, 73) -> flatten to (batch, 4672)
-        # target_policy: (batch, 4672)
-        # But wait, model output is (B, 8, 8, 73). We need to match shapes.
-        # Let's verify target_policy shape from MCTS/ReplayBuffer.
-        # Usually, target policy is probability distribution.
-        
-        # We use torch.sum(-target * log_pred) for cross entropy with soft targets
+        # pred_policy_logits are already log_softmax from the model: (batch, 8, 8, 73)
         pred_policy_log_probs = pred_policy_logits.view(pred_policy_logits.size(0), -1)
         target_policy_flat = target_policy.view(target_policy.size(0), -1)
         
         # Cross Entropy = - sum(target * log(pred))
-        # pred_policy_logits are already log_softmax from the model
         policy_loss = -torch.sum(target_policy_flat * pred_policy_log_probs) / target_policy_flat.size(0)
         
         return value_loss, policy_loss
@@ -114,7 +107,7 @@ class Trainer:
         
         # Compute loss
         value_loss, policy_loss = self.compute_loss(pred_policies, pred_values, policies, values)
-        total_loss = value_loss + policy_loss
+        total_loss = policy_loss + self.value_loss_weight * value_loss
         
         # Debug: log value statistics occasionally
         if hasattr(self, '_step_count'):

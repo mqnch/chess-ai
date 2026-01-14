@@ -28,43 +28,125 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Device setup
+if torch.cuda.is_available():
+    NUM_GPUS = torch.cuda.device_count()
+    DEVICE = "cuda"
+    DEVICES = [f"cuda:{i}" for i in range(NUM_GPUS)]
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    DEVICE = "mps"
+    DEVICES = ["mps"]
+    NUM_GPUS = 1
+else:
+    DEVICE = "cpu"
+    DEVICES = ["cpu"]
+    NUM_GPUS = 0
+
 # ===== CONFIGURATION =====
 # Adjust these parameters based on available compute and time
 
 # Training parameters
-NUM_ITERATIONS = 10  # Number of training iterations (each: generate games + train)
-GAMES_PER_ITERATION = 5  # Self-play games to generate per iteration
-TRAIN_BATCH_SIZE = 16  # Batch size for training
-TRAIN_BATCHES_PER_EPOCH = 50  # Number of training batches per epoch
-VAL_SPLIT = 0.1  # Fraction of games to hold out for validation (0.0 to disable)
+NUM_ITERATIONS = 100  # More iterations for deep learning
+GAMES_PER_ITERATION = 100  # More games to keep 4x3090 busy
+TRAIN_BATCH_SIZE = 512  # 128 per GPU
+TRAIN_BATCHES_PER_EPOCH = 400
+VAL_SPLIT = 0.1
 
 # MCTS parameters
-MCTS_SIMULATIONS = 100  # Lower for faster games (50-200 recommended for quick testing)
-MCTS_BATCH_SIZE = 4  # Batch size for neural network inference
+MCTS_SIMULATIONS = 400
+MCTS_BATCH_SIZE = 16
 
 # Distributed self-play
-NUM_SELFPLAY_WORKERS = 1  # Set >1 to enable multiprocessing self-play
-DISTRIBUTED_MAX_BATCH = 16  # Max inference batch size for the shared server
-INFERENCE_DEVICE = None  # Defaults to DEVICE if None
+NUM_SELFPLAY_WORKERS = 48 # Scaled for Threadripper 64-cores
+DISTRIBUTED_MAX_BATCH = 64
+INFERENCE_DEVICE = DEVICES  # Use all GPUs for inference
 
 # Model parameters
-MODEL_CHANNELS = 128  # 128 for faster training, 256 for better quality
-MODEL_RESIDUAL_BLOCKS = 6  # 6 for faster training, 8-10 for better quality
+MODEL_CHANNELS = 256
+MODEL_RESIDUAL_BLOCKS = 10
 
-# Device
-# M1 Mac users: PyTorch supports MPS (Metal Performance Shaders) for GPU acceleration
-# Try "mps" instead of "cpu" if you have PyTorch 1.12+ with MPS support
-if torch.cuda.is_available():
-    DEVICE = "cuda"
-elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-    DEVICE = "mps"  # M1 Mac GPU acceleration
-else:
-    DEVICE = "cpu"
+# Loss balancing
+VALUE_LOSS_WEIGHT = 1.0
 
 # Checkpointing
 CHECKPOINT_DIR = Path("checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
-SAVE_CHECKPOINT_EVERY = 2  # Save checkpoint every N iterations
+SAVE_CHECKPOINT_EVERY = 2
+
+
+def _train_worker(rank, world_size, model_config, state_dict, batch_data, settings, results_dict):
+    """
+    Worker process for distributed training using DDP.
+    """
+    import os
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    from torch.utils.data import TensorDataset, DataLoader
+    from torch.utils.data.distributed import DistributedSampler
+    
+    # Setup distributed environment
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo", rank=rank, world_size=world_size)
+    
+    device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+    
+    # Initialize model
+    model = ChessNet(
+        num_residual_blocks=model_config["num_residual_blocks"],
+        num_channels=model_config["num_channels"],
+    ).to(device)
+    model.load_state_dict(state_dict)
+    model = DDP(model, device_ids=[rank] if torch.cuda.is_available() else None)
+    
+    # Initialize trainer
+    trainer = Trainer(
+        model=model,
+        device=str(device),
+        learning_rate=settings["learning_rate"],
+        weight_decay=settings["weight_decay"],
+        value_loss_weight=settings.get("value_loss_weight", 1.0),
+    )
+    
+    # Prepare data
+    states, policies, values = batch_data
+    dataset = TensorDataset(states, policies, values)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=settings["train_batch_size"], sampler=sampler, num_workers=0, pin_memory=True)
+    
+    # Training loop for this epoch
+    model.train()
+    total_metrics = {"total_loss": 0.0, "value_loss": 0.0, "policy_loss": 0.0}
+    num_batches = 0
+    
+    # We want to run for settings["train_batches_per_epoch"] total batches across all GPUs
+    # so each GPU runs for settings["train_batches_per_epoch"] // world_size
+    batches_to_run = settings["train_batches_per_epoch"] // world_size
+    
+    for _ in range((batches_to_run // len(dataloader)) + 1):
+        for batch in dataloader:
+            if num_batches >= batches_to_run:
+                break
+            metrics = trainer.train_step(batch)
+            for k, v in metrics.items():
+                if k in total_metrics:
+                    total_metrics[k] += v
+            num_batches += 1
+        if num_batches >= batches_to_run:
+            break
+            
+    # Average metrics
+    if num_batches > 0:
+        for k in total_metrics:
+            total_metrics[k] /= num_batches
+            
+    # Gather metrics (simplified: only rank 0 returns)
+    if rank == 0:
+        results_dict["metrics"] = total_metrics
+        # Save state dict from rank 0 to return to main process
+        results_dict["state_dict"] = {k: v.cpu() for k, v in model.module.state_dict().items()}
+        
+    dist.destroy_process_group()
 
 
 def build_default_settings() -> Dict[str, Any]:
@@ -80,8 +162,9 @@ def build_default_settings() -> Dict[str, Any]:
         "model_residual_blocks": MODEL_RESIDUAL_BLOCKS,
         "learning_rate": 0.02,
         "weight_decay": 1e-4,
-        "replay_buffer_capacity": 50_000,
-        "val_buffer_capacity": 10_000,
+        "value_loss_weight": VALUE_LOSS_WEIGHT,
+        "replay_buffer_capacity": 200_000,
+        "val_buffer_capacity": 20_000,
         "temperature_initial": 1.25,
         "temperature_final": 0.1,
         "temperature_switch_move": 30,
@@ -146,6 +229,9 @@ def main():
         f"{settings['mcts_simulations']} sims/move, "
         f"{num_workers} workers"
     )
+    logger.info(
+        f"Loss weights -> value: {settings.get('value_loss_weight', 1.0):.2f}"
+    )
     logger.info("=" * 60)
 
     model = ChessNet(
@@ -159,6 +245,7 @@ def main():
         device=training_device,
         learning_rate=settings["learning_rate"],
         weight_decay=settings["weight_decay"],
+        value_loss_weight=settings.get("value_loss_weight", 1.0),
     )
 
     replay_buffer = ReplayBuffer(capacity=settings["replay_buffer_capacity"])
@@ -264,17 +351,44 @@ def main():
                 )
                 continue
 
-            logger.info(f"Training on {len(replay_buffer)} samples...")
+            logger.info(f"Training on {len(replay_buffer)} samples across {NUM_GPUS or 1} GPUs...")
             train_start = time.time()
 
-            val_batches = 10 if val_buffer and len(val_buffer) > 0 else 0
-            metrics = trainer.train_epoch(
-                replay_buffer=replay_buffer,
-                batch_size=train_batch_size,
-                num_batches=train_batches,
-                val_buffer=val_buffer,
-                val_batches=val_batches,
-            )
+            if NUM_GPUS > 1:
+                # Prepare data for all workers
+                states, policies, values = replay_buffer.sample(len(replay_buffer), as_tensors=True)
+                batch_data = (states, policies, values)
+                
+                model_config = {
+                    "num_residual_blocks": settings["model_residual_blocks"],
+                    "num_channels": settings["model_channels"],
+                }
+                state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
+                
+                # Use a manager for results
+                ctx = torch.multiprocessing.get_context("spawn")
+                manager = ctx.Manager()
+                results_dict = manager.dict()
+                
+                torch.multiprocessing.spawn(
+                    _train_worker,
+                    args=(NUM_GPUS, model_config, state_dict, batch_data, settings, results_dict),
+                    nprocs=NUM_GPUS,
+                    join=True
+                )
+                
+                metrics = results_dict.get("metrics")
+                if "state_dict" in results_dict:
+                    model.load_state_dict(results_dict["state_dict"])
+            else:
+                val_batches = 10 if val_buffer and len(val_buffer) > 0 else 0
+                metrics = trainer.train_epoch(
+                    replay_buffer=replay_buffer,
+                    batch_size=train_batch_size,
+                    num_batches=train_batches,
+                    val_buffer=val_buffer,
+                    val_batches=val_batches,
+                )
 
             train_time = time.time() - train_start
 

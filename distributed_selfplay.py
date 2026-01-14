@@ -34,9 +34,9 @@ class RemoteInferenceClient:
     each worker process creates its own client with a dedicated response queue.
     """
 
-    def __init__(self, request_queue: mp.Queue):
+    def __init__(self, request_queue: mp.Queue, response_queue: mp.Queue):
         self.request_queue = request_queue
-        self.response_queue: mp.Queue = mp.Queue()
+        self.response_queue: mp.Queue = response_queue
         self._next_request_id = 0
         self._closed = False
 
@@ -65,7 +65,10 @@ class RemoteInferenceClient:
     def close(self):
         if not self._closed:
             self._closed = True
-            self.response_queue.close()
+            # Queue proxies from multiprocessing.Manager don't have close()
+            # They're automatically cleaned up by the manager
+            if hasattr(self.response_queue, 'close'):
+                self.response_queue.close()
 
 
 def _inference_server_main(
@@ -141,12 +144,13 @@ def _self_play_worker_main(
     config_dict: Dict,
     request_queue: mp.Queue,
     result_queue: mp.Queue,
+    response_queue: mp.Queue,
 ):
     """
     worker process: runs self-play games using RemoteInferenceClient.
     """
     config = SelfPlayConfig(**config_dict)
-    client = RemoteInferenceClient(request_queue)
+    client = RemoteInferenceClient(request_queue, response_queue)
     runner = SelfPlayGame(
         model=None,
         device="cpu",
@@ -185,45 +189,68 @@ def run_distributed_self_play(
     total_games: int,
     device: str,
     num_workers: int = 4,
-    inference_device: Optional[str] = None,
+    inference_device: Optional[str | List[str]] = None,
     max_batch_size: int = 16,
 ) -> List[List[SelfPlaySample]]:
     """
-    spawn a shared inference server and multiple self-play workers, returning
-    the collected trajectories.
+    spawn shared inference servers (one per device) and multiple self-play workers,
+    returning the collected trajectories.
     """
     if total_games <= 0 or num_workers <= 0:
         return []
 
-    inference_device = inference_device or device
+    # Handle multiple inference devices
+    if inference_device is None:
+        inference_devices = [device]
+    elif isinstance(inference_device, str):
+        inference_devices = [inference_device]
+    else:
+        inference_devices = inference_device
+
     ctx = mp.get_context("spawn")
-    request_queue: mp.Queue = ctx.Queue(maxsize=num_workers * max_batch_size * 2)
-    result_queue: mp.Queue = ctx.Queue()
+    manager = ctx.Manager()
+    
+    # One request queue per inference server
+    request_queues: List[mp.Queue] = [
+        manager.Queue(maxsize=num_workers * max_batch_size * 2)
+        for _ in inference_devices
+    ]
+    result_queue: mp.Queue = manager.Queue()
 
     model_config = {
         "num_residual_blocks": getattr(model, "num_residual_blocks", 6),
         "num_channels": getattr(model, "num_channels", 256),
     }
-    # ensure CPU tensors before sending to another process
     state_dict = {k: v.detach().cpu() for k, v in model.state_dict().items()}
 
-    server = ctx.Process(
-        target=_inference_server_main,
-        args=(model_config, state_dict, inference_device, request_queue, max_batch_size),
-        name="InferenceServer",
-    )
-    server.start()
+    servers: List[mp.Process] = []
+    for i, dev in enumerate(inference_devices):
+        server = ctx.Process(
+            target=_inference_server_main,
+            args=(model_config, state_dict, dev, request_queues[i], max_batch_size),
+            name=f"InferenceServer-{i}",
+        )
+        server.start()
+        servers.append(server)
 
     games_per_worker = _split_work(total_games, num_workers)
     workers: List[mp.Process] = []
     config_dict = asdict(config)
+    
+    response_queues: List[mp.Queue] = []
 
     for worker_id, games_to_play in enumerate(games_per_worker):
         if games_to_play <= 0:
             continue
+        response_queue = manager.Queue()
+        response_queues.append(response_queue)
+        
+        # Round-robin assignment of workers to inference servers
+        q_idx = worker_id % len(request_queues)
+        
         proc = ctx.Process(
             target=_self_play_worker_main,
-            args=(worker_id, games_to_play, config_dict, request_queue, result_queue),
+            args=(worker_id, games_to_play, config_dict, request_queues[q_idx], result_queue, response_queue),
             name=f"SelfPlayWorker-{worker_id}",
         )
         proc.start()
@@ -235,16 +262,21 @@ def run_distributed_self_play(
 
     try:
         while finished_workers < expected_workers:
-            message = result_queue.get()
-            if message["type"] == "SAMPLES":
-                trajectories.append(message["samples"])
-            elif message["type"] == "DONE":
-                finished_workers += 1
+            try:
+                message = result_queue.get(timeout=1.0)
+                if message["type"] == "SAMPLES":
+                    trajectories.append(message["samples"])
+                elif message["type"] == "DONE":
+                    finished_workers += 1
+            except queue.Empty:
+                continue
     finally:
         for proc in workers:
             proc.join()
-        request_queue.put({"type": "STOP"})
-        server.join()
+        for q in request_queues:
+            q.put({"type": "STOP"})
+        for server in servers:
+            server.join()
 
     return trajectories
 
